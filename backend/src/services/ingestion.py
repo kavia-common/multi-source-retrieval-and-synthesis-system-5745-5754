@@ -9,7 +9,7 @@ from src.services.parsers.docx import extract_docx_text
 from src.services.parsers.txt import extract_txt_text
 from src.services.parsers.tabular import extract_csv, extract_xlsx
 from src.services.chunking import recursive_character_splitter
-from src.services.embeddings import get_embeddings_client
+from src.services.embeddings import get_embeddings_client, BaseEmbeddings
 from src.services.vectorstore import VectorStore
 from src.models.ingest import IngestResponse, IngestStats
 from src.db.mongo import JobsRepository
@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 class IngestionService:
     def __init__(self):
         self.jobs = JobsRepository()
-        self.embeddings = get_embeddings_client()
+        self.embeddings: BaseEmbeddings = get_embeddings_client()
         self.vs = VectorStore()
         os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 
@@ -43,6 +43,15 @@ class IngestionService:
         try:
             text_units = self._parse(stype, tmp_path)
             chunks, payloads = self._chunk_and_payload(text_units, filename, stype)
+            # Ensure vector store collection exists on-demand now that we know the dimension
+            try:
+                self.vs.ensure_collection(dim=self.embeddings.dimension)
+            except Exception as ve:
+                # If vector store isn't configured properly, fail gracefully
+                logger.exception("Vector store initialization failed")
+                raise HTTPException(status_code=503, detail=f"Vector store not available: {ve}")
+
+            # Attempt embeddings; if unconfigured, embed_texts will raise informative HTTPException(503)
             vectors = await self.embeddings.embed_texts([c for c in chunks])
             ids = [uuid.uuid4().hex for _ in chunks]
             self.vs.upsert_chunks(
@@ -58,6 +67,10 @@ class IngestionService:
                 stats=stats,
                 metadata={"filename": filename, "source_type": stype},
             )
+        except HTTPException as he:
+            # Propagate known service availability errors and update job record
+            self.jobs.update_job(job_id, status="failed", error=he.detail)
+            raise
         except Exception as e:
             self.jobs.update_job(job_id, status="failed", error=str(e))
             logger.exception("Ingestion failed")

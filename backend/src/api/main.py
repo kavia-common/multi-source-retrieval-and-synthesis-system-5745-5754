@@ -5,8 +5,10 @@ from src.api.routes.health import router as health_router
 from src.api.routes.files import router as files_router
 from src.api.routes.jobs import router as jobs_router
 from src.api.routes.query import router as query_router
-from src.services.vectorstore import VectorStore
-from src.services.embeddings import get_embeddings_client
+from src.utils.logging import get_logger
+from src.utils.config import settings
+
+logger = get_logger(__name__)
 
 # Initialize FastAPI app with metadata and tags for OpenAPI
 app = FastAPI(
@@ -30,17 +32,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 @app.on_event("startup")
 def startup_event():
     """
-    Ensure vector store collection exists on startup with the correct dimension based on embedding model.
+    Perform lightweight startup checks without failing the server when optional
+    configuration (like OPENAI_API_KEY) is missing. We avoid creating embeddings here.
     """
-    embeddings = get_embeddings_client()
-    dim = embeddings.dimension
-    vs = VectorStore()
-    vs.ensure_collection(dim=dim)
-
+    if not settings.OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY not set. Embeddings and related endpoints will return 503 until configured.")
+    # We don't ensure the vector store collection here because dim depends on embeddings model.
+    # Collection will be ensured on-demand inside services when embeddings are available.
 
 # Register routers
 app.include_router(health_router, prefix="", tags=["health"])
